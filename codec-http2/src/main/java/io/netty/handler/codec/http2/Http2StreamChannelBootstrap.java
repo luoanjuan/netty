@@ -15,6 +15,8 @@
  */
 package io.netty.handler.codec.http2;
 
+import static java.util.Objects.requireNonNull;
+
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -26,7 +28,6 @@ import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
-import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -40,13 +41,13 @@ import java.util.Map;
 public final class Http2StreamChannelBootstrap {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2StreamChannelBootstrap.class);
 
-    private final Map<ChannelOption<?>, Object> options = new LinkedHashMap<ChannelOption<?>, Object>();
-    private final Map<AttributeKey<?>, Object> attrs = new LinkedHashMap<AttributeKey<?>, Object>();
+    private final Map<ChannelOption<?>, Object> options = new LinkedHashMap<>();
+    private final Map<AttributeKey<?>, Object> attrs = new LinkedHashMap<>();
     private final Channel channel;
     private volatile ChannelHandler handler;
 
     public Http2StreamChannelBootstrap(Channel channel) {
-        this.channel = ObjectUtil.checkNotNull(channel, "channel");
+        this.channel = requireNonNull(channel, "channel");
     }
 
     /**
@@ -55,9 +56,7 @@ public final class Http2StreamChannelBootstrap {
      */
     @SuppressWarnings("unchecked")
     public <T> Http2StreamChannelBootstrap option(ChannelOption<T> option, T value) {
-        if (option == null) {
-            throw new NullPointerException("option");
-        }
+        requireNonNull(option, "option");
         if (value == null) {
             synchronized (options) {
                 options.remove(option);
@@ -76,9 +75,7 @@ public final class Http2StreamChannelBootstrap {
      */
     @SuppressWarnings("unchecked")
     public <T> Http2StreamChannelBootstrap attr(AttributeKey<T> key, T value) {
-        if (key == null) {
-            throw new NullPointerException("key");
-        }
+        requireNonNull(key, "key");
         if (value == null) {
             synchronized (attrs) {
                 attrs.remove(key);
@@ -96,12 +93,12 @@ public final class Http2StreamChannelBootstrap {
      */
     @SuppressWarnings("unchecked")
     public Http2StreamChannelBootstrap handler(ChannelHandler handler) {
-        this.handler = ObjectUtil.checkNotNull(handler, "handler");
+        this.handler = requireNonNull(handler, "handler");
         return this;
     }
 
     public Future<Http2StreamChannel> open() {
-        return open(channel.eventLoop().<Http2StreamChannel>newPromise());
+        return open(channel.eventLoop().newPromise());
     }
 
     public Future<Http2StreamChannel> open(final Promise<Http2StreamChannel> promise) {
@@ -118,12 +115,7 @@ public final class Http2StreamChannelBootstrap {
             if (executor.inEventLoop()) {
                 open0(ctx, promise);
             } else {
-                executor.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        open0(ctx, promise);
-                    }
-                });
+                executor.execute(() -> open0(ctx, promise));
             }
         }
         return promise;
@@ -140,23 +132,20 @@ public final class Http2StreamChannelBootstrap {
             return;
         }
 
-        ChannelFuture future = ctx.channel().eventLoop().register(streamChannel);
-        future.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (future.isSuccess()) {
-                    promise.setSuccess(streamChannel);
-                } else if (future.isCancelled()) {
-                    promise.cancel(false);
+        ChannelFuture future = streamChannel.register();
+        future.addListener((ChannelFutureListener) future1 -> {
+            if (future1.isSuccess()) {
+                promise.setSuccess(streamChannel);
+            } else if (future1.isCancelled()) {
+                promise.cancel(false);
+            } else {
+                if (streamChannel.isRegistered()) {
+                    streamChannel.close();
                 } else {
-                    if (streamChannel.isRegistered()) {
-                        streamChannel.close();
-                    } else {
-                        streamChannel.unsafe().closeForcibly();
-                    }
-
-                    promise.setFailure(future.cause());
+                    streamChannel.unsafe().closeForcibly();
                 }
+
+                promise.setFailure(future1.cause());
             }
         });
     }

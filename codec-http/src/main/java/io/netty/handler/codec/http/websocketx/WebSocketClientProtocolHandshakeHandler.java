@@ -18,7 +18,7 @@ package io.netty.handler.codec.http.websocketx;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
+import io.netty.channel.ChannelInboundHandler;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.websocketx.WebSocketClientProtocolHandler.ClientHandshakeStateEvent;
@@ -29,7 +29,8 @@ import java.util.concurrent.TimeUnit;
 
 import static io.netty.util.internal.ObjectUtil.*;
 
-class WebSocketClientProtocolHandshakeHandler extends ChannelInboundHandlerAdapter {
+class WebSocketClientProtocolHandshakeHandler implements ChannelInboundHandler {
+
     private static final long DEFAULT_HANDSHAKE_TIMEOUT_MS = 10000L;
 
     private final WebSocketClientHandshaker handshaker;
@@ -54,17 +55,14 @@ class WebSocketClientProtocolHandshakeHandler extends ChannelInboundHandlerAdapt
 
     @Override
     public void channelActive(final ChannelHandlerContext ctx) throws Exception {
-        super.channelActive(ctx);
-        handshaker.handshake(ctx.channel()).addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (!future.isSuccess()) {
-                    handshakePromise.tryFailure(future.cause());
-                    ctx.fireExceptionCaught(future.cause());
-                } else {
-                    ctx.fireUserEventTriggered(
-                            WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_ISSUED);
-                }
+        ctx.fireChannelActive();
+        handshaker.handshake(ctx.channel()).addListener((ChannelFutureListener) future -> {
+            if (!future.isSuccess()) {
+                handshakePromise.tryFailure(future.cause());
+                ctx.fireExceptionCaught(future.cause());
+            } else {
+                ctx.fireUserEventTriggered(
+                        WebSocketClientProtocolHandler.ClientHandshakeStateEvent.HANDSHAKE_ISSUED);
             }
         });
         applyHandshakeTimeout();

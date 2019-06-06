@@ -21,6 +21,9 @@ import java.math.BigInteger;
 import javax.net.ssl.SSLSession;
 import javax.security.cert.X509Certificate;
 
+import io.netty.channel.ChannelInboundHandler;
+import io.netty.channel.MultithreadEventLoopGroup;
+import io.netty.channel.nio.NioHandler;
 import org.bouncycastle.asn1.ocsp.OCSPResponseStatus;
 import org.bouncycastle.cert.ocsp.BasicOCSPResp;
 import org.bouncycastle.cert.ocsp.CertificateStatus;
@@ -31,12 +34,10 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.FullHttpRequest;
@@ -87,7 +88,7 @@ public class OcspClientExample {
                 .build();
 
         try {
-            EventLoopGroup group = new NioEventLoopGroup();
+            EventLoopGroup group = new MultithreadEventLoopGroup(NioHandler.newFactory());
             try {
                 Promise<FullHttpResponse> promise = group.next().newPromise();
 
@@ -151,7 +152,7 @@ public class OcspClientExample {
         };
     }
 
-    private static class HttpClientHandler extends ChannelInboundHandlerAdapter {
+    private static class HttpClientHandler implements ChannelInboundHandler {
 
         private final String host;
 

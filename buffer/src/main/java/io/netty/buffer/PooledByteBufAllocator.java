@@ -56,12 +56,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     private static final int MIN_PAGE_SIZE = 4096;
     private static final int MAX_CHUNK_SIZE = (int) (((long) Integer.MAX_VALUE + 1) / 2);
 
-    private final Runnable trimTask = new Runnable() {
-        @Override
-        public void run() {
-            PooledByteBufAllocator.this.trimCurrentThreadCache();
-        }
-    };
+    private final Runnable trimTask = this::trimCurrentThreadCache;
 
     static {
         int defaultPageSize = SystemPropertyUtil.getInt("io.netty.allocator.pageSize", 8192);
@@ -128,7 +123,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
                 "io.netty.allocation.cacheTrimIntervalMillis", 0);
 
         DEFAULT_USE_CACHE_FOR_ALL_THREADS = SystemPropertyUtil.getBoolean(
-                "io.netty.allocator.useCacheForAllThreads", true);
+                "io.netty.allocator.useCacheForAllThreads", false);
 
         DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT = SystemPropertyUtil.getInt(
                 "io.netty.allocator.directMemoryCacheAlignment", 0);
@@ -249,7 +244,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
 
         if (nHeapArena > 0) {
             heapArenas = newArenaArray(nHeapArena);
-            List<PoolArenaMetric> metrics = new ArrayList<PoolArenaMetric>(heapArenas.length);
+            List<PoolArenaMetric> metrics = new ArrayList<>(heapArenas.length);
             for (int i = 0; i < heapArenas.length; i ++) {
                 PoolArena.HeapArena arena = new PoolArena.HeapArena(this,
                         pageSize, maxOrder, pageShifts, chunkSize,
@@ -265,7 +260,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
 
         if (nDirectArena > 0) {
             directArenas = newArenaArray(nDirectArena);
-            List<PoolArenaMetric> metrics = new ArrayList<PoolArenaMetric>(directArenas.length);
+            List<PoolArenaMetric> metrics = new ArrayList<>(directArenas.length);
             for (int i = 0; i < directArenas.length; i ++) {
                 PoolArena.DirectArena arena = new PoolArena.DirectArena(
                         this, pageSize, maxOrder, pageShifts, chunkSize, directMemoryCacheAlignment);

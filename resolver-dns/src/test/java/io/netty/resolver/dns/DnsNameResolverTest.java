@@ -22,8 +22,9 @@ import io.netty.channel.ChannelFactory;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.ReflectiveChannelFactory;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioHandler;
 import io.netty.channel.socket.DatagramChannel;
 import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.nio.NioDatagramChannel;
@@ -42,7 +43,6 @@ import io.netty.util.CharsetUtil;
 import io.netty.util.NetUtil;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
-import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.logging.InternalLogger;
@@ -91,10 +91,12 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Queue;
 import java.util.Set;
+import java.util.concurrent.CompletionException;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -105,12 +107,19 @@ import static io.netty.handler.codec.dns.DnsRecordType.AAAA;
 import static io.netty.handler.codec.dns.DnsRecordType.CNAME;
 import static io.netty.resolver.dns.DnsServerAddresses.sequential;
 import static java.util.Collections.singletonList;
-import static java.util.Collections.singletonMap;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.instanceOf;
 import static org.hamcrest.Matchers.is;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 public class DnsNameResolverTest {
 
@@ -122,7 +131,7 @@ public class DnsNameResolverTest {
     // $ curl -O http://s3.amazonaws.com/alexa-static/top-1m.csv.zip
     // $ unzip -o top-1m.csv.zip top-1m.csv
     // $ head -100 top-1m.csv | cut -d, -f2 | cut -d/ -f1 | while read L; do echo '"'"$L"'",'; done > topsites.txt
-    private static final Set<String> DOMAINS = Collections.unmodifiableSet(new HashSet<String>(Arrays.asList(
+    private static final Set<String> DOMAINS = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "google.com",
             "youtube.com",
             "facebook.com",
@@ -225,7 +234,7 @@ public class DnsNameResolverTest {
             "pixnet.net",
             "localhost")));
 
-    private static final Map<String, String> DOMAINS_PUNYCODE = new HashMap<String, String>();
+    private static final Map<String, String> DOMAINS_PUNYCODE = new HashMap<>();
 
     static {
         DOMAINS_PUNYCODE.put("büchner.de", "xn--bchner-3ya.de");
@@ -235,7 +244,7 @@ public class DnsNameResolverTest {
     private static final Set<String> DOMAINS_ALL;
 
     static {
-        Set<String> all = new HashSet<String>(DOMAINS.size() + DOMAINS_PUNYCODE.size());
+        Set<String> all = new HashSet<>(DOMAINS.size() + DOMAINS_PUNYCODE.size());
         all.addAll(DOMAINS);
         all.addAll(DOMAINS_PUNYCODE.values());
         DOMAINS_ALL = Collections.unmodifiableSet(all);
@@ -244,7 +253,7 @@ public class DnsNameResolverTest {
     /**
      * The list of the domain names to exclude from {@link #testResolveAorAAAA()}.
      */
-    private static final Set<String> EXCLUSIONS_RESOLVE_A = new HashSet<String>();
+    private static final Set<String> EXCLUSIONS_RESOLVE_A = new HashSet<>();
 
     static {
         Collections.addAll(
@@ -258,7 +267,7 @@ public class DnsNameResolverTest {
      * The list of the domain names to exclude from {@link #testResolveAAAA()}.
      * Unfortunately, there are only handful of domain names with IPv6 addresses.
      */
-    private static final Set<String> EXCLUSIONS_RESOLVE_AAAA = new HashSet<String>();
+    private static final Set<String> EXCLUSIONS_RESOLVE_AAAA = new HashSet<>();
 
     static {
         EXCLUSIONS_RESOLVE_AAAA.addAll(EXCLUSIONS_RESOLVE_A);
@@ -296,7 +305,7 @@ public class DnsNameResolverTest {
     /**
      * The list of the domain names to exclude from {@link #testQueryMx()}.
      */
-    private static final Set<String> EXCLUSIONS_QUERY_MX = new HashSet<String>();
+    private static final Set<String> EXCLUSIONS_QUERY_MX = new HashSet<>();
 
     static {
         Collections.addAll(
@@ -313,7 +322,7 @@ public class DnsNameResolverTest {
     }
 
     private static final TestDnsServer dnsServer = new TestDnsServer(DOMAINS_ALL);
-    private static final EventLoopGroup group = new NioEventLoopGroup(1);
+    private static final EventLoopGroup group = new MultithreadEventLoopGroup(1, NioHandler.newFactory());
 
     @Rule
     public ExpectedException expectedException = ExpectedException.none();
@@ -397,39 +406,32 @@ public class DnsNameResolverTest {
     @Test
     public void testNameServerCache() throws IOException, InterruptedException {
         final String overriddenIP = "12.34.12.34";
-        final TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                switch (question.getRecordType()) {
-                    case A:
-                        Map<String, Object> attr = new HashMap<String, Object>();
-                        attr.put(DnsAttribute.IP_ADDRESS.toLowerCase(Locale.US), overriddenIP);
-                        return Collections.<ResourceRecord>singleton(
-                                new TestDnsServer.TestResourceRecord(
-                                        question.getDomainName(), question.getRecordType(), attr));
-                    default:
-                        return null;
-                }
+        final TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            switch (question.getRecordType()) {
+                case A:
+                    Map<String, Object> attr = new HashMap<>();
+                    attr.put(DnsAttribute.IP_ADDRESS.toLowerCase(Locale.US), overriddenIP);
+                    return Collections.singleton(
+                            new TestDnsServer.TestResourceRecord(
+                                    question.getDomainName(), question.getRecordType(), attr));
+                default:
+                    return null;
             }
         });
         dnsServer2.start();
         try {
-            final Set<String> overriddenHostnames = new HashSet<String>();
+            final Set<String> overriddenHostnames = new HashSet<>();
             for (String name : DOMAINS) {
                 if (EXCLUSIONS_RESOLVE_A.contains(name)) {
                     continue;
                 }
-                if (PlatformDependent.threadLocalRandom().nextBoolean()) {
+                if (ThreadLocalRandom.current().nextBoolean()) {
                     overriddenHostnames.add(name);
                 }
             }
-            DnsNameResolver resolver = newResolver(false, new DnsServerAddressStreamProvider() {
-                @Override
-                public DnsServerAddressStream nameServerAddressStream(String hostname) {
-                    return overriddenHostnames.contains(hostname) ? sequential(dnsServer2.localAddress()).stream() :
-                            null;
-                }
-            }).build();
+            DnsNameResolver resolver = newResolver(false, hostname ->
+                    overriddenHostnames.contains(hostname) ? sequential(dnsServer2.localAddress()).stream() : null)
+                    .build();
             try {
                 final Map<String, InetAddress> resultA = testResolve0(resolver, EXCLUSIONS_RESOLVE_A, AAAA);
                 for (Entry<String, InetAddress> resolvedEntry : resultA.entrySet()) {
@@ -550,9 +552,9 @@ public class DnsNameResolverTest {
 
         assertThat(resolver.isRecursionDesired(), is(true));
 
-        final Map<String, InetAddress> results = new HashMap<String, InetAddress>();
+        final Map<String, InetAddress> results = new HashMap<>();
         final Map<String, Future<InetAddress>> futures =
-                new LinkedHashMap<String, Future<InetAddress>>();
+                new LinkedHashMap<>();
 
         for (String name : DOMAINS) {
             if (excludedDomains.contains(name)) {
@@ -595,7 +597,7 @@ public class DnsNameResolverTest {
             assertThat(resolver.isRecursionDesired(), is(true));
 
             Map<String, Future<AddressedEnvelope<DnsResponse, InetSocketAddress>>> futures =
-                    new LinkedHashMap<String, Future<AddressedEnvelope<DnsResponse, InetSocketAddress>>>();
+                    new LinkedHashMap<>();
             for (String name : DOMAINS) {
                 if (EXCLUSIONS_QUERY_MX.contains(name)) {
                     continue;
@@ -612,7 +614,7 @@ public class DnsNameResolverTest {
                 assertThat(response.code(), is(DnsResponseCode.NOERROR));
 
                 final int answerCount = response.count(DnsSection.ANSWER);
-                final List<DnsRecord> mxList = new ArrayList<DnsRecord>(answerCount);
+                final List<DnsRecord> mxList = new ArrayList<>(answerCount);
                 for (int i = 0; i < answerCount; i++) {
                     final DnsRecord r = response.recordAt(DnsSection.ANSWER, i);
                     if (r.type() == DnsRecordType.MX) {
@@ -655,7 +657,7 @@ public class DnsNameResolverTest {
             resolveNonExistentDomain(resolver);
 
             final int size = 10000;
-            final List<UnknownHostException> exceptions = new ArrayList<UnknownHostException>();
+            final List<UnknownHostException> exceptions = new ArrayList<>();
 
             // If negative cache works, this thread should be done really quickly.
             final Thread negativeLookupThread = new Thread() {
@@ -686,10 +688,11 @@ public class DnsNameResolverTest {
 
     private static UnknownHostException resolveNonExistentDomain(DnsNameResolver resolver) {
         try {
-            resolver.resolve("non-existent.netty.io").sync();
+            resolver.resolve("non-existent.netty.io").syncUninterruptibly();
             fail();
             return null;
-        } catch (Exception e) {
+        } catch (CompletionException cause) {
+            Throwable e = cause.getCause();
             assertThat(e, is(instanceOf(UnknownHostException.class)));
 
             TestRecursiveCacheDnsQueryLifecycleObserverFactory lifecycleObserverFactory =
@@ -785,36 +788,33 @@ public class DnsNameResolverTest {
         final String lastName = "lastname.com";
         final String ipv4Addr = "1.2.3.4";
         final String ipv6Addr = "::1";
-        TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                ResourceRecordModifier rm = new ResourceRecordModifier();
-                rm.setDnsClass(RecordClass.IN);
-                rm.setDnsName(question.getDomainName());
-                rm.setDnsTtl(100);
-                rm.setDnsType(RecordType.CNAME);
+        TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            ResourceRecordModifier rm = new ResourceRecordModifier();
+            rm.setDnsClass(RecordClass.IN);
+            rm.setDnsName(question.getDomainName());
+            rm.setDnsTtl(100);
+            rm.setDnsType(RecordType.CNAME);
 
-                if (question.getDomainName().equals(firstName)) {
-                    rm.put(DnsAttribute.DOMAIN_NAME, secondName);
-                } else if (question.getDomainName().equals(secondName)) {
-                    rm.put(DnsAttribute.DOMAIN_NAME, lastName);
-                } else if (question.getDomainName().equals(lastName)) {
-                    rm.setDnsType(question.getRecordType());
-                    switch (question.getRecordType()) {
-                        case A:
-                            rm.put(DnsAttribute.IP_ADDRESS, ipv4Addr);
-                            break;
-                        case AAAA:
-                            rm.put(DnsAttribute.IP_ADDRESS, ipv6Addr);
-                            break;
-                        default:
-                            return null;
-                    }
-                } else {
-                    return null;
+            if (question.getDomainName().equals(firstName)) {
+                rm.put(DnsAttribute.DOMAIN_NAME, secondName);
+            } else if (question.getDomainName().equals(secondName)) {
+                rm.put(DnsAttribute.DOMAIN_NAME, lastName);
+            } else if (question.getDomainName().equals(lastName)) {
+                rm.setDnsType(question.getRecordType());
+                switch (question.getRecordType()) {
+                    case A:
+                        rm.put(DnsAttribute.IP_ADDRESS, ipv4Addr);
+                        break;
+                    case AAAA:
+                        rm.put(DnsAttribute.IP_ADDRESS, ipv6Addr);
+                        break;
+                    default:
+                        return null;
                 }
-                return Collections.singleton(rm.getEntry());
+            } else {
+                return null;
             }
+            return Collections.singleton(rm.getEntry());
         });
         dnsServer2.start();
         DnsNameResolver resolver = null;
@@ -860,47 +860,41 @@ public class DnsNameResolverTest {
         final String ipv4Addr = "1.2.3.4";
         final String ipv6Addr = "::1";
         final AtomicBoolean hitServer2 = new AtomicBoolean();
-        final TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) throws DnsException {
-                hitServer2.set(true);
-                if (question.getDomainName().equals(firstName)) {
-                    ResourceRecordModifier rm = new ResourceRecordModifier();
-                    rm.setDnsClass(RecordClass.IN);
-                    rm.setDnsName(question.getDomainName());
-                    rm.setDnsTtl(100);
-                    rm.setDnsType(RecordType.CNAME);
-                    rm.put(DnsAttribute.DOMAIN_NAME, lastName);
-                    return Collections.singleton(rm.getEntry());
-                } else {
-                    throw new DnsException(ResponseCode.REFUSED);
-                }
+        final TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            hitServer2.set(true);
+            if (question.getDomainName().equals(firstName)) {
+                ResourceRecordModifier rm = new ResourceRecordModifier();
+                rm.setDnsClass(RecordClass.IN);
+                rm.setDnsName(question.getDomainName());
+                rm.setDnsTtl(100);
+                rm.setDnsType(RecordType.CNAME);
+                rm.put(DnsAttribute.DOMAIN_NAME, lastName);
+                return Collections.singleton(rm.getEntry());
+            } else {
+                throw new DnsException(ResponseCode.REFUSED);
             }
         });
-        final TestDnsServer dnsServer3 = new TestDnsServer(new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) throws DnsException {
-                if (question.getDomainName().equals(lastName)) {
-                    ResourceRecordModifier rm = new ResourceRecordModifier();
-                    rm.setDnsClass(RecordClass.IN);
-                    rm.setDnsName(question.getDomainName());
-                    rm.setDnsTtl(100);
-                    rm.setDnsType(question.getRecordType());
-                    switch (question.getRecordType()) {
-                        case A:
-                            rm.put(DnsAttribute.IP_ADDRESS, ipv4Addr);
-                            break;
-                        case AAAA:
-                            rm.put(DnsAttribute.IP_ADDRESS, ipv6Addr);
-                            break;
-                        default:
-                            return null;
-                    }
-
-                    return Collections.singleton(rm.getEntry());
-                } else {
-                    throw new DnsException(ResponseCode.REFUSED);
+        final TestDnsServer dnsServer3 = new TestDnsServer(question -> {
+            if (question.getDomainName().equals(lastName)) {
+                ResourceRecordModifier rm = new ResourceRecordModifier();
+                rm.setDnsClass(RecordClass.IN);
+                rm.setDnsName(question.getDomainName());
+                rm.setDnsTtl(100);
+                rm.setDnsType(question.getRecordType());
+                switch (question.getRecordType()) {
+                    case A:
+                        rm.put(DnsAttribute.IP_ADDRESS, ipv4Addr);
+                        break;
+                    case AAAA:
+                        rm.put(DnsAttribute.IP_ADDRESS, ipv6Addr);
+                        break;
+                    default:
+                        return null;
                 }
+
+                return Collections.singleton(rm.getEntry());
+            } else {
+                throw new DnsException(ResponseCode.REFUSED);
             }
         });
         dnsServer2.start();
@@ -978,7 +972,7 @@ public class DnsNameResolverTest {
         try {
             assertThat(resolver.isRecursionDesired(), is(true));
 
-            final Map<String, Future<List<DnsRecord>>> futures = new LinkedHashMap<String, Future<List<DnsRecord>>>();
+            final Map<String, Future<List<DnsRecord>>> futures = new LinkedHashMap<>();
             for (String name : DOMAINS) {
                 if (EXCLUSIONS_QUERY_MX.contains(name)) {
                     continue;
@@ -1021,24 +1015,21 @@ public class DnsNameResolverTest {
     public void testResolveAllHostsFile() {
         final DnsNameResolver resolver = new DnsNameResolverBuilder(group.next())
                 .channelType(NioDatagramChannel.class)
-                .hostsFileEntriesResolver(new HostsFileEntriesResolver() {
-                    @Override
-                    public InetAddress address(String inetHost, ResolvedAddressTypes resolvedAddressTypes) {
-                        if ("foo.com.".equals(inetHost)) {
-                            try {
-                                return InetAddress.getByAddress("foo.com", new byte[] { 1, 2, 3, 4 });
-                            } catch (UnknownHostException e) {
-                                throw new Error(e);
-                            }
+                .hostsFileEntriesResolver((inetHost, resolvedAddressTypes) -> {
+                    if ("foo.com.".equals(inetHost)) {
+                        try {
+                            return InetAddress.getByAddress("foo.com", new byte[] { 1, 2, 3, 4 });
+                        } catch (UnknownHostException e) {
+                            throw new Error(e);
                         }
-                        return null;
                     }
+                    return null;
                 }).build();
 
         final List<DnsRecord> records = resolver.resolveAll(new DefaultDnsQuestion("foo.com.", A))
                 .syncUninterruptibly().getNow();
-        assertThat(records, Matchers.<DnsRecord>hasSize(1));
-        assertThat(records.get(0), Matchers.<DnsRecord>instanceOf(DnsRawRecord.class));
+        assertThat(records, Matchers.hasSize(1));
+        assertThat(records.get(0), Matchers.instanceOf(DnsRawRecord.class));
 
         final DnsRawRecord record = (DnsRawRecord) records.get(0);
         final ByteBuf content = record.content();
@@ -1210,7 +1201,7 @@ public class DnsNameResolverTest {
         // This store is non-compliant, returning records of the wrong type for a query.
         // It works since we don't verify the type of the result when resolving to deal with
         // non-compliant servers in the wild.
-        List<Set<ResourceRecord>> records = new ArrayList<Set<ResourceRecord>>();
+        List<Set<ResourceRecord>> records = new ArrayList<>();
         final String ipv6Address = "0:0:0:0:0:0:1:1";
         final String ipv4Address = "1.1.1.1";
         if (types == ResolvedAddressTypes.IPV4_PREFERRED) {
@@ -1221,12 +1212,7 @@ public class DnsNameResolverTest {
             records.add(Collections.singleton(TestDnsServer.newAddressRecord(name, RecordType.AAAA, ipv6Address)));
         }
         final Iterator<Set<ResourceRecord>> recordsIterator = records.iterator();
-        RecordStore arbitrarilyOrderedStore = new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord questionRecord) {
-                return recordsIterator.next();
-            }
-        };
+        RecordStore arbitrarilyOrderedStore = questionRecord -> recordsIterator.next();
         TestDnsServer nonCompliantDnsServer = new TestDnsServer(arbitrarilyOrderedStore);
         nonCompliantDnsServer.start();
         try {
@@ -1260,7 +1246,7 @@ public class DnsNameResolverTest {
         final String hostname = "some.record.netty.io";
         final String hostname2 = "some2.record.netty.io";
 
-        final TestDnsServer dnsServerAuthority = new TestDnsServer(new HashSet<String>(
+        final TestDnsServer dnsServerAuthority = new TestDnsServer(new HashSet<>(
                 Arrays.asList(hostname, hostname2)));
         dnsServerAuthority.start();
 
@@ -1272,7 +1258,7 @@ public class DnsNameResolverTest {
                 cache ? new DefaultAuthoritativeDnsServerCache() : NoopAuthoritativeDnsServerCache.INSTANCE);
         TestRecursiveCacheDnsQueryLifecycleObserverFactory lifecycleObserverFactory =
                 new TestRecursiveCacheDnsQueryLifecycleObserverFactory();
-        EventLoopGroup group = new NioEventLoopGroup(1);
+        EventLoopGroup group = new MultithreadEventLoopGroup(1, NioHandler.newFactory());
         final DnsNameResolver resolver = new DnsNameResolver(
                 group.next(), new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class),
                 NoopDnsCache.INSTANCE, nsCache, lifecycleObserverFactory, 3000, ResolvedAddressTypes.IPV4_ONLY, true,
@@ -1290,8 +1276,7 @@ public class DnsNameResolverTest {
 
         // Java7 will strip of the "." so we need to adjust the expected dnsname. Both are valid in terms of the RFC
         // so its ok.
-        String expectedDnsName = PlatformDependent.javaVersion() == 7 ?
-                "dns4.some.record.netty.io" : "dns4.some.record.netty.io.";
+        String expectedDnsName = "dns4.some.record.netty.io.";
 
         try {
             resolver.resolveAll(hostname).syncUninterruptibly();
@@ -1399,19 +1384,16 @@ public class DnsNameResolverTest {
         // This is used to simulate a query timeout...
         final DatagramSocket socket = new DatagramSocket(new InetSocketAddress(0));
 
-        final TestDnsServer dnsServerAuthority = new TestDnsServer(new RecordStore() {
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                if (question.getDomainName().equals(expected.getHostName())) {
-                    return Collections.singleton(TestDnsServer.newARecord(
-                            expected.getHostName(), expected.getHostAddress()));
-                }
-                return Collections.emptySet();
+        final TestDnsServer dnsServerAuthority = new TestDnsServer(question -> {
+            if (question.getDomainName().equals(expected.getHostName())) {
+                return Collections.singleton(TestDnsServer.newARecord(
+                        expected.getHostName(), expected.getHostAddress()));
             }
+            return Collections.emptySet();
         });
         dnsServerAuthority.start();
 
-        TestDnsServer redirectServer = new TestDnsServer(new HashSet<String>(
+        TestDnsServer redirectServer = new TestDnsServer(new HashSet<>(
                 Arrays.asList(expected.getHostName(), ns1Name, ns2Name))) {
             @Override
             protected DnsMessage filterMessage(DnsMessage message) {
@@ -1433,7 +1415,7 @@ public class DnsNameResolverTest {
             }
         };
         redirectServer.start();
-        EventLoopGroup group = new NioEventLoopGroup(1);
+        EventLoopGroup group = new MultithreadEventLoopGroup(1, NioHandler.newFactory());
         final DnsNameResolver resolver = new DnsNameResolver(
                 group.next(), new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class),
                 cache, authoritativeDnsServerCache, NoopDnsQueryLifecycleObserverFactory.INSTANCE, 2000,
@@ -1546,7 +1528,7 @@ public class DnsNameResolverTest {
                 InetAddress.getByAddress(ns1Name, new byte[] { 10, 0, 0, 4 }),
                 DefaultDnsServerAddressStreamProvider.DNS_PORT);
 
-        TestDnsServer redirectServer = new TestDnsServer(new HashSet<String>(Arrays.asList(hostname, ns1Name))) {
+        TestDnsServer redirectServer = new TestDnsServer(new HashSet<>(Arrays.asList(hostname, ns1Name))) {
             @Override
             protected DnsMessage filterMessage(DnsMessage message) {
                 for (QuestionRecord record: message.getQuestionRecords()) {
@@ -1569,9 +1551,9 @@ public class DnsNameResolverTest {
             }
         };
         redirectServer.start();
-        EventLoopGroup group = new NioEventLoopGroup(1);
+        EventLoopGroup group = new MultithreadEventLoopGroup(1, NioHandler.newFactory());
 
-        final List<InetSocketAddress> cached = new CopyOnWriteArrayList<InetSocketAddress>();
+        final List<InetSocketAddress> cached = new CopyOnWriteArrayList<>();
         final AuthoritativeDnsServerCache authoritativeDnsServerCache = new AuthoritativeDnsServerCache() {
             @Override
             public DnsServerAddressStream get(String hostname) {
@@ -1594,7 +1576,7 @@ public class DnsNameResolverTest {
             }
         };
 
-        final AtomicReference<DnsServerAddressStream> redirectedRef = new AtomicReference<DnsServerAddressStream>();
+        final AtomicReference<DnsServerAddressStream> redirectedRef = new AtomicReference<>();
         final DnsNameResolver resolver = new DnsNameResolver(
                 group.next(), new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class),
                 NoopDnsCache.INSTANCE, authoritativeDnsServerCache,
@@ -1674,7 +1656,7 @@ public class DnsNameResolverTest {
         final InetSocketAddress ns5Address = new InetSocketAddress(
                 InetAddress.getByAddress(ns2Name, new byte[] { 10, 0, 0, 5 }),
                 DefaultDnsServerAddressStreamProvider.DNS_PORT);
-        TestDnsServer redirectServer = new TestDnsServer(new HashSet<String>(Arrays.asList(hostname, ns1Name))) {
+        TestDnsServer redirectServer = new TestDnsServer(new HashSet<>(Arrays.asList(hostname, ns1Name))) {
             @Override
             protected DnsMessage filterMessage(DnsMessage message) {
                 for (QuestionRecord record: message.getQuestionRecords()) {
@@ -1699,9 +1681,9 @@ public class DnsNameResolverTest {
             }
         };
         redirectServer.start();
-        EventLoopGroup group = new NioEventLoopGroup(1);
+        EventLoopGroup group = new MultithreadEventLoopGroup(1, NioHandler.newFactory());
 
-        final List<InetSocketAddress> cached = new CopyOnWriteArrayList<InetSocketAddress>();
+        final List<InetSocketAddress> cached = new CopyOnWriteArrayList<>();
         final AuthoritativeDnsServerCache authoritativeDnsServerCache = new AuthoritativeDnsServerCache() {
             @Override
             public DnsServerAddressStream get(String hostname) {
@@ -1731,7 +1713,7 @@ public class DnsNameResolverTest {
         cache.cache(ns1Name, null, ns3Address.getAddress(), 10000, loop);
         cache.cache(ns1Name, null, ns4Address.getAddress(), 10000, loop);
 
-        final AtomicReference<DnsServerAddressStream> redirectedRef = new AtomicReference<DnsServerAddressStream>();
+        final AtomicReference<DnsServerAddressStream> redirectedRef = new AtomicReference<>();
         final DnsNameResolver resolver = new DnsNameResolver(
                 loop, new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class),
                 cache, authoritativeDnsServerCache,
@@ -1821,7 +1803,7 @@ public class DnsNameResolverTest {
     private static final class TestRecursiveCacheDnsQueryLifecycleObserverFactory
             implements DnsQueryLifecycleObserverFactory {
         final Queue<TestDnsQueryLifecycleObserver> observers =
-                new ConcurrentLinkedQueue<TestDnsQueryLifecycleObserver>();
+                new ConcurrentLinkedQueue<>();
         @Override
         public DnsQueryLifecycleObserver newDnsQueryLifecycleObserver(DnsQuestion question) {
             TestDnsQueryLifecycleObserver observer = new TestDnsQueryLifecycleObserver(question);
@@ -1882,7 +1864,7 @@ public class DnsNameResolverTest {
     }
 
     private static final class TestDnsQueryLifecycleObserver implements DnsQueryLifecycleObserver {
-        final Queue<Object> events = new ArrayDeque<Object>();
+        final Queue<Object> events = new ArrayDeque<>();
         final DnsQuestion question;
 
         TestDnsQueryLifecycleObserver(DnsQuestion question) {
@@ -1930,7 +1912,7 @@ public class DnsNameResolverTest {
 
     private static final class TestAuthoritativeDnsServerCache implements AuthoritativeDnsServerCache {
         final AuthoritativeDnsServerCache cache;
-        final Map<String, DnsServerAddressStream> cacheHits = new HashMap<String, DnsServerAddressStream>();
+        final Map<String, DnsServerAddressStream> cacheHits = new HashMap<>();
 
         TestAuthoritativeDnsServerCache(AuthoritativeDnsServerCache cache) {
             this.cache = cache;
@@ -1964,7 +1946,7 @@ public class DnsNameResolverTest {
     private static final class TestDnsCache implements DnsCache {
         final DnsCache cache;
         final Map<String, List<? extends DnsCacheEntry>> cacheHits =
-                new HashMap<String, List<? extends DnsCacheEntry>>();
+                new HashMap<>();
 
         TestDnsCache(DnsCache cache) {
             this.cache = cache;
@@ -2086,14 +2068,14 @@ public class DnsNameResolverTest {
     @Test
     public void testDnsNameResolverBuilderCopy() {
         ChannelFactory<DatagramChannel> channelFactory =
-                new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class);
+                new ReflectiveChannelFactory<>(NioDatagramChannel.class);
         DnsNameResolverBuilder builder = new DnsNameResolverBuilder(group.next())
                 .channelFactory(channelFactory);
         DnsNameResolverBuilder copiedBuilder = builder.copy();
 
         // change channel factory does not propagate to previously made copy
         ChannelFactory<DatagramChannel> newChannelFactory =
-                new ReflectiveChannelFactory<DatagramChannel>(NioDatagramChannel.class);
+                new ReflectiveChannelFactory<>(NioDatagramChannel.class);
         builder.channelFactory(newChannelFactory);
         assertEquals(channelFactory, copiedBuilder.channelFactory());
         assertEquals(newChannelFactory, builder.channelFactory());
@@ -2101,28 +2083,24 @@ public class DnsNameResolverTest {
 
     @Test
     public void testFollowCNAMEEvenIfARecordIsPresent() throws IOException {
-        TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
+        TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            if (question.getDomainName().equals("cname.netty.io")) {
+                Map<String, Object> map1 = new HashMap<>();
+                map1.put(DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99");
+                return Collections.singleton(
+                        new TestDnsServer.TestResourceRecord(question.getDomainName(), RecordType.A, map1));
+            } else {
+                Set<ResourceRecord> records = new LinkedHashSet<>(2);
+                Map<String, Object> map = new HashMap<>();
+                map.put(DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io");
+                records.add(new TestDnsServer.TestResourceRecord(
+                        question.getDomainName(), RecordType.CNAME, map));
 
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                if (question.getDomainName().equals("cname.netty.io")) {
-                    Map<String, Object> map1 = new HashMap<String, Object>();
-                    map1.put(DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99");
-                    return Collections.<ResourceRecord>singleton(
-                            new TestDnsServer.TestResourceRecord(question.getDomainName(), RecordType.A, map1));
-                } else {
-                    Set<ResourceRecord> records = new LinkedHashSet<ResourceRecord>(2);
-                    Map<String, Object> map = new HashMap<String, Object>();
-                    map.put(DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io");
-                    records.add(new TestDnsServer.TestResourceRecord(
-                            question.getDomainName(), RecordType.CNAME, map));
-
-                    Map<String, Object> map1 = new HashMap<String, Object>();
-                    map1.put(DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.2");
-                    records.add(new TestDnsServer.TestResourceRecord(
-                            question.getDomainName(), RecordType.A, map1));
-                    return records;
-                }
+                Map<String, Object> map1 = new HashMap<>();
+                map1.put(DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.2");
+                records.add(new TestDnsServer.TestResourceRecord(
+                        question.getDomainName(), RecordType.A, map1));
+                return records;
             }
         });
         dnsServer2.start();
@@ -2149,31 +2127,27 @@ public class DnsNameResolverTest {
     }
 
     @Test
-    public void testFollowCNAMELoop() throws IOException {
+    public void testFollowCNAMELoop() throws Throwable {
         expectedException.expect(UnknownHostException.class);
-        TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
+        TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            Set<ResourceRecord> records = new LinkedHashSet<>(4);
 
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                Set<ResourceRecord> records = new LinkedHashSet<ResourceRecord>(4);
-
-                records.add(new TestDnsServer.TestResourceRecord("x." + question.getDomainName(),
-                        RecordType.A, Collections.<String, Object>singletonMap(
-                                DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99")));
-                records.add(new TestDnsServer.TestResourceRecord(
-                        "cname2.netty.io", RecordType.CNAME,
-                        Collections.<String, Object>singletonMap(
-                                DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
-                records.add(new TestDnsServer.TestResourceRecord(
-                        "cname.netty.io", RecordType.CNAME,
-                        Collections.<String, Object>singletonMap(
-                                DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname2.netty.io")));
-                records.add(new TestDnsServer.TestResourceRecord(
-                        question.getDomainName(), RecordType.CNAME,
-                        Collections.<String, Object>singletonMap(
-                                DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
-                return records;
-            }
+            records.add(new TestDnsServer.TestResourceRecord("x." + question.getDomainName(),
+                    RecordType.A, Collections.singletonMap(
+                            DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99")));
+            records.add(new TestDnsServer.TestResourceRecord(
+                    "cname2.netty.io", RecordType.CNAME,
+                    Collections.singletonMap(
+                            DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
+            records.add(new TestDnsServer.TestResourceRecord(
+                    "cname.netty.io", RecordType.CNAME,
+                    Collections.singletonMap(
+                            DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname2.netty.io")));
+            records.add(new TestDnsServer.TestResourceRecord(
+                    question.getDomainName(), RecordType.CNAME,
+                    Collections.singletonMap(
+                            DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
+            return records;
         });
         dnsServer2.start();
         DnsNameResolver resolver = null;
@@ -2186,6 +2160,8 @@ public class DnsNameResolverTest {
 
             resolver = builder.build();
             resolver.resolveAll("somehost.netty.io").syncUninterruptibly().getNow();
+        } catch (CompletionException e) {
+            throw e.getCause();
         } finally {
             dnsServer2.stop();
             if (resolver != null) {
@@ -2195,24 +2171,26 @@ public class DnsNameResolverTest {
     }
 
     @Test
-    public void testSearchDomainQueryFailureForSingleAddressTypeCompletes() {
+    public void testSearchDomainQueryFailureForSingleAddressTypeCompletes() throws Throwable {
         expectedException.expect(UnknownHostException.class);
         testSearchDomainQueryFailureCompletes(ResolvedAddressTypes.IPV4_ONLY);
     }
 
     @Test
-    public void testSearchDomainQueryFailureForMultipleAddressTypeCompletes() {
+    public void testSearchDomainQueryFailureForMultipleAddressTypeCompletes() throws Throwable {
         expectedException.expect(UnknownHostException.class);
         testSearchDomainQueryFailureCompletes(ResolvedAddressTypes.IPV4_PREFERRED);
     }
 
-    private void testSearchDomainQueryFailureCompletes(ResolvedAddressTypes types) {
+    private void testSearchDomainQueryFailureCompletes(ResolvedAddressTypes types) throws Throwable {
         DnsNameResolver resolver = newResolver()
                 .resolvedAddressTypes(types)
                 .ndots(1)
                 .searchDomains(singletonList(".")).build();
         try {
             resolver.resolve("invalid.com").syncUninterruptibly();
+        } catch (CompletionException cause) {
+            throw cause.getCause();
         } finally {
             resolver.close();
         }
@@ -2336,11 +2314,8 @@ public class DnsNameResolverTest {
     public void testChannelFactoryException() {
         final IllegalStateException exception = new IllegalStateException();
         try {
-            newResolver().channelFactory(new ChannelFactory<DatagramChannel>() {
-                @Override
-                public DatagramChannel newChannel() {
-                    throw exception;
-                }
+            newResolver().channelFactory(eventLoop -> {
+                throw exception;
             }).build();
             fail();
         } catch (Exception e) {
@@ -2350,40 +2325,36 @@ public class DnsNameResolverTest {
 
     @Test
     public void testCNameCached() throws Exception {
-        final Map<String, String> cache = new ConcurrentHashMap<String, String>();
+        final Map<String, String> cache = new ConcurrentHashMap<>();
         final AtomicInteger cnameQueries = new AtomicInteger();
         final AtomicInteger aQueries = new AtomicInteger();
 
-        TestDnsServer dnsServer2 = new TestDnsServer(new RecordStore() {
+        TestDnsServer dnsServer2 = new TestDnsServer(question -> {
+            if ("cname.netty.io".equals(question.getDomainName())) {
+                aQueries.incrementAndGet();
 
-            @Override
-            public Set<ResourceRecord> getRecords(QuestionRecord question) {
-                if ("cname.netty.io".equals(question.getDomainName())) {
-                    aQueries.incrementAndGet();
-
-                    return Collections.<ResourceRecord>singleton(new TestDnsServer.TestResourceRecord(
-                            question.getDomainName(), RecordType.A,
-                            Collections.<String, Object>singletonMap(
-                                    DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99")));
-                }
-                if ("x.netty.io".equals(question.getDomainName())) {
-                    cnameQueries.incrementAndGet();
-
-                    return Collections.<ResourceRecord>singleton(new TestDnsServer.TestResourceRecord(
-                            question.getDomainName(), RecordType.CNAME,
-                            Collections.<String, Object>singletonMap(
-                                    DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
-                }
-                if ("y.netty.io".equals(question.getDomainName())) {
-                    cnameQueries.incrementAndGet();
-
-                    return Collections.<ResourceRecord>singleton(new TestDnsServer.TestResourceRecord(
-                            question.getDomainName(), RecordType.CNAME,
-                            Collections.<String, Object>singletonMap(
-                                    DnsAttribute.DOMAIN_NAME.toLowerCase(), "x.netty.io")));
-                }
-                return Collections.emptySet();
+                return Collections.singleton(new TestDnsServer.TestResourceRecord(
+                        question.getDomainName(), RecordType.A,
+                        Collections.singletonMap(
+                                DnsAttribute.IP_ADDRESS.toLowerCase(), "10.0.0.99")));
             }
+            if ("x.netty.io".equals(question.getDomainName())) {
+                cnameQueries.incrementAndGet();
+
+                return Collections.singleton(new TestDnsServer.TestResourceRecord(
+                        question.getDomainName(), RecordType.CNAME,
+                        Collections.singletonMap(
+                                DnsAttribute.DOMAIN_NAME.toLowerCase(), "cname.netty.io")));
+            }
+            if ("y.netty.io".equals(question.getDomainName())) {
+                cnameQueries.incrementAndGet();
+
+                return Collections.singleton(new TestDnsServer.TestResourceRecord(
+                        question.getDomainName(), RecordType.CNAME,
+                        Collections.singletonMap(
+                                DnsAttribute.DOMAIN_NAME.toLowerCase(), "x.netty.io")));
+            }
+            return Collections.emptySet();
         });
         dnsServer2.start();
         DnsNameResolver resolver = null;

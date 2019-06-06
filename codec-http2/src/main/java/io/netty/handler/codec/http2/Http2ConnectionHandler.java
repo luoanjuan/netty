@@ -20,7 +20,6 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelOutboundHandler;
 import io.netty.channel.ChannelPromise;
 import io.netty.handler.codec.ByteToMessageDecoder;
 import io.netty.handler.codec.http.HttpResponseStatus;
@@ -49,8 +48,8 @@ import static io.netty.handler.codec.http2.Http2Exception.isStreamError;
 import static io.netty.handler.codec.http2.Http2FrameTypes.SETTINGS;
 import static io.netty.handler.codec.http2.Http2Stream.State.IDLE;
 import static io.netty.util.CharsetUtil.UTF_8;
-import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static java.lang.Math.min;
+import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.MILLISECONDS;
 
 /**
@@ -63,8 +62,7 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * {@link Http2LocalFlowController}
  */
 @UnstableApi
-public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http2LifecycleManager,
-                                                                            ChannelOutboundHandler {
+public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http2LifecycleManager {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2ConnectionHandler.class);
 
@@ -88,9 +86,9 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
 
     protected Http2ConnectionHandler(Http2ConnectionDecoder decoder, Http2ConnectionEncoder encoder,
                                      Http2Settings initialSettings, boolean decoupleCloseAndGoAway) {
-        this.initialSettings = checkNotNull(initialSettings, "initialSettings");
-        this.decoder = checkNotNull(decoder, "decoder");
-        this.encoder = checkNotNull(encoder, "encoder");
+        this.initialSettings = requireNonNull(initialSettings, "initialSettings");
+        this.decoder = requireNonNull(decoder, "decoder");
+        this.encoder = requireNonNull(encoder, "encoder");
         this.decoupleCloseAndGoAway = decoupleCloseAndGoAway;
         if (encoder.connection() != decoder.connection()) {
             throw new IllegalArgumentException("Encoder and Decoder do not share the same connection object");
@@ -507,6 +505,11 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
     }
 
     @Override
+    public void register(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
+        ctx.register(promise);
+    }
+
+    @Override
     public void deregister(ChannelHandlerContext ctx, ChannelPromise promise) throws Exception {
         ctx.deregister(promise);
     }
@@ -537,7 +540,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         // Discard bytes of the cumulation buffer if needed.
         discardSomeReadBytes();
 
-        // Ensure we never stale the HTTP/2 Channel. Flow-control is enforced by HTTP/2.
+        // Ensure we never stall the HTTP/2 Channel. Flow-control is enforced by HTTP/2.
         //
         // See https://tools.ietf.org/html/rfc7540#section-5.2.2
         if (!ctx.channel().config().isAutoRead()) {
@@ -607,12 +610,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         if (future.isDone()) {
             checkCloseConnection(future);
         } else {
-            future.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    checkCloseConnection(future);
-                }
-            });
+            future.addListener((ChannelFutureListener) this::checkCloseConnection);
         }
     }
 
@@ -748,12 +746,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         if (future.isDone()) {
             closeConnectionOnError(ctx, future);
         } else {
-            future.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    closeConnectionOnError(ctx, future);
-                }
-            });
+            future.addListener((ChannelFutureListener) future1 -> closeConnectionOnError(ctx, future1));
         }
         return future;
     }
@@ -793,12 +786,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         if (future.isDone()) {
             processRstStreamWriteResult(ctx, stream, future);
         } else {
-            future.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    processRstStreamWriteResult(ctx, stream, future);
-                }
-            });
+            future.addListener((ChannelFutureListener) future1 -> processRstStreamWriteResult(ctx, stream, future1));
         }
 
         return future;
@@ -829,12 +817,8 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
         if (future.isDone()) {
             processGoAwayWriteResult(ctx, lastStreamId, errorCode, debugData, future);
         } else {
-            future.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    processGoAwayWriteResult(ctx, lastStreamId, errorCode, debugData, future);
-                }
-            });
+            future.addListener((ChannelFutureListener) future1 ->
+                    processGoAwayWriteResult(ctx, lastStreamId, errorCode, debugData, future1));
         }
         // if closeListener != null this means we have already initiated graceful closure. doGracefulShutdown will apply
         // the gracefulShutdownTimeoutMillis on each invocation, however we only care to apply the timeout on the
@@ -942,12 +926,7 @@ public class Http2ConnectionHandler extends ByteToMessageDecoder implements Http
                                      long timeout, TimeUnit unit) {
             this.ctx = ctx;
             this.promise = promise;
-            timeoutTask = ctx.executor().schedule(new Runnable() {
-                @Override
-                public void run() {
-                    doClose();
-                }
-            }, timeout, unit);
+            timeoutTask = ctx.executor().schedule(this::doClose, timeout, unit);
         }
 
         @Override

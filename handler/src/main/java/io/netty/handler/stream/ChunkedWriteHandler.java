@@ -18,9 +18,7 @@ package io.netty.handler.stream;
 import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
-import io.netty.channel.ChannelDuplexHandler;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelPipeline;
@@ -65,12 +63,12 @@ import java.util.Queue;
  * transfer.  To resume the transfer when a new chunk is available, you have to
  * call {@link #resumeTransfer()}.
  */
-public class ChunkedWriteHandler extends ChannelDuplexHandler {
+public class ChunkedWriteHandler implements ChannelHandler {
 
     private static final InternalLogger logger =
         InternalLoggerFactory.getInstance(ChunkedWriteHandler.class);
 
-    private final Queue<PendingWrite> queue = new ArrayDeque<PendingWrite>();
+    private final Queue<PendingWrite> queue = new ArrayDeque<>();
     private volatile ChannelHandlerContext ctx;
     private PendingWrite currentWrite;
 
@@ -105,13 +103,7 @@ public class ChunkedWriteHandler extends ChannelDuplexHandler {
             resumeTransfer0(ctx);
         } else {
             // let the transfer resume on the next event loop round
-            ctx.executor().execute(new Runnable() {
-
-                @Override
-                public void run() {
-                    resumeTransfer0(ctx);
-                }
-            });
+            ctx.executor().execute(() -> resumeTransfer0(ctx));
         }
     }
 
@@ -282,46 +274,38 @@ public class ChunkedWriteHandler extends ChannelDuplexHandler {
                     // be closed before its not written.
                     //
                     // See https://github.com/netty/netty/issues/303
-                    f.addListener(new ChannelFutureListener() {
-                        @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
-                            if (!future.isSuccess()) {
-                                closeInput(chunks);
-                                currentWrite.fail(future.cause());
-                            } else {
-                                // read state of the input in local variables before closing it
-                                long inputProgress = chunks.progress();
-                                long inputLength = chunks.length();
-                                closeInput(chunks);
-                                currentWrite.progress(inputProgress, inputLength);
-                                currentWrite.success(inputLength);
-                            }
+
+                    f.addListener(future -> {
+                        if (!future.isSuccess()) {
+                            closeInput(chunks);
+                            currentWrite.fail(future.cause());
+                        } else {
+                            // read state of the input in local variables before closing it
+                            long inputProgress = chunks.progress();
+                            long inputLength = chunks.length();
+                            closeInput(chunks);
+                            currentWrite.progress(inputProgress, inputLength);
+                            currentWrite.success(inputLength);
                         }
                     });
                 } else if (channel.isWritable()) {
-                    f.addListener(new ChannelFutureListener() {
-                        @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
-                            if (!future.isSuccess()) {
-                                closeInput(chunks);
-                                currentWrite.fail(future.cause());
-                            } else {
-                                currentWrite.progress(chunks.progress(), chunks.length());
-                            }
+                    f.addListener(future -> {
+                        if (!future.isSuccess()) {
+                            closeInput(chunks);
+                            currentWrite.fail(future.cause());
+                        } else {
+                            currentWrite.progress(chunks.progress(), chunks.length());
                         }
                     });
                 } else {
-                    f.addListener(new ChannelFutureListener() {
-                        @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
-                            if (!future.isSuccess()) {
-                                closeInput(chunks);
-                                currentWrite.fail(future.cause());
-                            } else {
-                                currentWrite.progress(chunks.progress(), chunks.length());
-                                if (channel.isWritable()) {
-                                    resumeTransfer();
-                                }
+                    f.addListener(future -> {
+                        if (!future.isSuccess()) {
+                            closeInput(chunks);
+                            currentWrite.fail(future.cause());
+                        } else {
+                            currentWrite.progress(chunks.progress(), chunks.length());
+                            if (channel.isWritable()) {
+                                resumeTransfer();
                             }
                         }
                     });

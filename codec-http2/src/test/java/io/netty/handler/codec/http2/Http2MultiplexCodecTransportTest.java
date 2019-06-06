@@ -20,7 +20,6 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.nio.NioEventLoopGroup;
@@ -79,7 +78,7 @@ public class Http2MultiplexCodecTransportTest {
             @Override
             protected void initChannel(Channel ch) {
                 ch.pipeline().addLast(Http2MultiplexCodecBuilder.forServer(new HttpInboundHandler()).build());
-                ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                ch.pipeline().addLast(new ChannelHandler() {
                     @Override
                     public void channelActive(ChannelHandlerContext ctx) {
                         serverConnectedChannelRef.set(ctx.channel());
@@ -107,7 +106,7 @@ public class Http2MultiplexCodecTransportTest {
             protected void initChannel(Channel ch) {
                 ch.pipeline().addLast(Http2MultiplexCodecBuilder
                         .forClient(new HttpInboundHandler()).autoAckSettingsFrame(false).build());
-                ch.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+                ch.pipeline().addLast(new ChannelHandler() {
                     @Override
                     public void channelRead(ChannelHandlerContext ctx, Object msg) {
                         if (msg instanceof Http2SettingsFrame) {
@@ -139,5 +138,5 @@ public class Http2MultiplexCodecTransportTest {
     }
 
     @ChannelHandler.Sharable
-    private static final class HttpInboundHandler extends ChannelInboundHandlerAdapter { }
+    private static final class HttpInboundHandler implements ChannelHandler { }
 }

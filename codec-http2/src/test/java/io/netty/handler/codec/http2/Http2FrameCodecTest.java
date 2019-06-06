@@ -18,8 +18,8 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
-import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.UnsupportedMessageTypeException;
@@ -573,18 +573,15 @@ public class Http2FrameCodecTest {
         assertNotNull(stream);
         assertFalse(isStreamIdValid(stream.id()));
 
-        final Promise<Void> listenerExecuted = new DefaultPromise<Void>(GlobalEventExecutor.INSTANCE);
+        final Promise<Void> listenerExecuted = new DefaultPromise<>(GlobalEventExecutor.INSTANCE);
 
         channel.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers(), false).stream(stream))
-               .addListener(new ChannelFutureListener() {
-                    @Override
-                    public void operationComplete(ChannelFuture future) throws Exception {
-                        assertTrue(future.isSuccess());
-                        assertTrue(isStreamIdValid(stream.id()));
-                        listenerExecuted.setSuccess(null);
-                    }
-                }
-        );
+               .addListener((ChannelFutureListener) future -> {
+                   assertTrue(future.isSuccess());
+                   assertTrue(isStreamIdValid(stream.id()));
+                   listenerExecuted.setSuccess(null);
+               }
+               );
         ByteBuf data = Unpooled.buffer().writeZero(100);
         ChannelFuture f = channel.writeAndFlush(new DefaultHttp2DataFrame(data).stream(stream));
         assertTrue(f.isSuccess());
@@ -742,18 +739,15 @@ public class Http2FrameCodecTest {
         @SuppressWarnings("unused")
         Http2FrameStream idleStream = frameCodec.newStream();
 
-        final Set<Http2FrameStream> activeStreams = new HashSet<Http2FrameStream>();
-        frameCodec.forEachActiveStream(new Http2FrameStreamVisitor() {
-            @Override
-            public boolean visit(Http2FrameStream stream) {
-                activeStreams.add(stream);
-                return true;
-            }
+        final Set<Http2FrameStream> activeStreams = new HashSet<>();
+        frameCodec.forEachActiveStream(stream -> {
+            activeStreams.add(stream);
+            return true;
         });
 
         assertEquals(2, activeStreams.size());
 
-        Set<Http2FrameStream> expectedStreams = new HashSet<Http2FrameStream>();
+        Set<Http2FrameStream> expectedStreams = new HashSet<>();
         expectedStreams.add(activeInbond);
         expectedStreams.add(activeOutbound);
         assertEquals(expectedStreams, activeStreams);
@@ -766,13 +760,10 @@ public class Http2FrameCodecTest {
 
         final AtomicBoolean listenerExecuted = new AtomicBoolean();
         channel.writeAndFlush(new DefaultHttp2HeadersFrame(new DefaultHttp2Headers()).stream(stream2))
-                .addListener(new ChannelFutureListener() {
-                    @Override
-                    public void operationComplete(ChannelFuture future) throws Exception {
-                        assertTrue(future.isSuccess());
-                        assertEquals(State.OPEN, stream2.state());
-                        listenerExecuted.set(true);
-                    }
+                .addListener((ChannelFutureListener) future -> {
+                    assertTrue(future.isSuccess());
+                    assertEquals(State.OPEN, stream2.state());
+                    listenerExecuted.set(true);
                 });
 
         assertTrue(listenerExecuted.get());
@@ -796,22 +787,19 @@ public class Http2FrameCodecTest {
 
     @Test
     public void upgradeWithoutFlowControlling() throws Exception {
-        channel.pipeline().addAfter(frameCodec.ctx.name(), null, new ChannelInboundHandlerAdapter() {
+        channel.pipeline().addAfter(frameCodec.ctx.name(), null, new ChannelHandler() {
             @Override
             public void channelRead(final ChannelHandlerContext ctx, Object msg) throws Exception {
                 if (msg instanceof Http2DataFrame) {
                     // Simulate consuming the frame and update the flow-controller.
                     Http2DataFrame data = (Http2DataFrame) msg;
                     ctx.writeAndFlush(new DefaultHttp2WindowUpdateFrame(data.initialFlowControlledBytes())
-                            .stream(data.stream())).addListener(new ChannelFutureListener() {
-                        @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
-                            Throwable cause = future.cause();
-                            if (cause != null) {
-                                ctx.fireExceptionCaught(cause);
-                            }
-                        }
-                    });
+                            .stream(data.stream())).addListener((ChannelFutureListener) future -> {
+                                Throwable cause = future.cause();
+                                if (cause != null) {
+                                    ctx.fireExceptionCaught(cause);
+                                }
+                            });
                 }
                 ReferenceCountUtil.release(msg);
             }
